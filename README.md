@@ -139,4 +139,3 @@ The final version of CSV Analyzer is intended to provide automated dataset analy
 
 ---
 
-## 🎯 Project Goa
