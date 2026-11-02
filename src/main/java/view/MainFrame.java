@@ -640,7 +640,7 @@ sidebar.add(databaseButton);
     try {
 
         java.util.List<String> datasets =
-                database.DatabaseManager.getDatasets();
+                database.databaseManager.getDatasets();
 
         if (datasets.isEmpty()) {
 

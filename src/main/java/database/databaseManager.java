@@ -8,7 +8,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 
-public class DatabaseManager {
+public class databaseManager {
 
     private static final String URL =
             "jdbc:mysql://localhost:3306/csv_analyser";
