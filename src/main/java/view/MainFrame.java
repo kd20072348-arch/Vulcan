@@ -2,7 +2,17 @@ package view;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+
+import analysis.Analyzer;
+import analysis.DuplicateAnalyzer;
+import analysis.MissingValueAnalyzer;
+import analysis.RowColumnAnalyzer;
+import util.CsvReader;
 
 public class MainFrame extends JFrame {
 
@@ -19,6 +29,20 @@ public class MainFrame extends JFrame {
     private JLabel missingValue;
 
     private JTable dataTable;
+
+    // ---- Review 2: data loaded from the CSV file + the analyzers ----
+    private String[] headers;
+    private List<String[]> rows;
+    private JButton analyzeButton;
+
+    private final MissingValueAnalyzer missingAnalyzer = new MissingValueAnalyzer();
+
+    // Interface in use: every item is a different class, but all are Analyzers
+    private final Analyzer[] analyzers = {
+            new RowColumnAnalyzer(),
+            missingAnalyzer,
+            new DuplicateAnalyzer()
+    };
 
     public MainFrame() {
 
@@ -174,17 +198,27 @@ public class MainFrame extends JFrame {
 
         sidebar.add(menuTitle);
 
-        sidebar.add(createMenuButton(
-                "📁   Import CSV"
-        ));
+        JButton importMenuButton =
+                createMenuButton("📁   Import CSV");
+
+        importMenuButton.addActionListener(
+                e -> openCSVFile()
+        );
+
+        sidebar.add(importMenuButton);
 
         sidebar.add(createMenuButton(
                 "📋   Data Preview"
         ));
 
-        sidebar.add(createMenuButton(
-                "📊   Analysis"
-        ));
+        JButton analysisMenuButton =
+                createMenuButton("📊   Analysis");
+
+        analysisMenuButton.addActionListener(
+                e -> runAnalysis()
+        );
+
+        sidebar.add(analysisMenuButton);
 
         sidebar.add(createMenuButton(
                 "📈   Charts"
@@ -471,10 +505,11 @@ sidebar.add(databaseButton);
         JButton importButton =
                 new JButton("Import CSV");
 
-        JButton analyzeButton =
+        analyzeButton =
                 new JButton("Analyze Dataset");
         
         importButton.addActionListener(e -> openCSVFile());
+        analyzeButton.addActionListener(e -> runAnalysis());
 
         stylePrimaryButton(importButton);
 
@@ -583,28 +618,214 @@ sidebar.add(databaseButton);
                 )
         );
     }
+    // ==============================
+    // REVIEW 2: LOAD CSV (THREADS)
+    // ==============================
+
     private void openCSVFile() {
 
-    JFileChooser fileChooser = new JFileChooser();
+        JFileChooser fileChooser = new JFileChooser();
 
-    fileChooser.setDialogTitle("Select CSV File");
+        fileChooser.setDialogTitle("Select CSV File");
 
-    int result = fileChooser.showOpenDialog(this);
+        int result = fileChooser.showOpenDialog(this);
 
-    if (result == JFileChooser.APPROVE_OPTION) {
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
 
-        java.io.File selectedFile =
-                fileChooser.getSelectedFile();
+        File selectedFile = fileChooser.getSelectedFile();
+
+        // THREAD 1: read the file in the background so the window does not freeze
+        Thread loaderThread = new Thread(() -> {
+
+            try {
+
+                List<String[]> all = CsvReader.read(selectedFile);
+
+                if (all.isEmpty()) {
+                    throw new IOException("The file is empty.");
+                }
+
+                String[] fileHeaders = all.get(0);                    // first line = column names
+                List<String[]> fileRows = all.subList(1, all.size());
+
+                // Swing components may only be changed from the Swing thread
+                SwingUtilities.invokeLater(
+                        () -> showDataset(fileHeaders, fileRows)
+                );
+
+                // THREAD 2: store the dataset info in MySQL (existing JDBC method)
+                saveToDatabase(
+                        selectedFile.getName(),
+                        fileRows.size(),
+                        fileHeaders.length
+                );
+
+            } catch (IOException ex) {
+
+                SwingUtilities.invokeLater(() ->
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "Could not read file:\n" + ex.getMessage(),
+                                "File Error",
+                                JOptionPane.ERROR_MESSAGE
+                        )
+                );
+            }
+        });
+
+        loaderThread.start();
+    }
+
+    // Fills the existing table and the ROWS / COLUMNS cards
+    private void showDataset(String[] fileHeaders, List<String[]> fileRows) {
+
+        headers = fileHeaders;
+        rows = fileRows;
+
+        DefaultTableModel model =
+                new DefaultTableModel(fileHeaders, 0) {
+                    @Override
+                    public boolean isCellEditable(int row, int column) {
+                        return false;
+                    }
+                };
+
+        int previewCount = Math.min(100, fileRows.size());   // preview = first 100 rows
+
+        for (int i = 0; i < previewCount; i++) {
+            model.addRow(fileRows.get(i));
+        }
+
+        dataTable.setModel(model);
+
+        rowValue.setText(String.valueOf(fileRows.size()));
+        columnValue.setText(String.valueOf(fileHeaders.length));
+        missingValue.setText("-");                             // filled in by the analysis
+    }
+
+    private void saveToDatabase(String filename, int rowCount, int columnCount) {
+
+        Thread databaseThread = new Thread(() -> {
+
+            try {
+
+                database.databaseManager.insertDataset(
+                        filename, rowCount, columnCount
+                );
+
+            } catch (Exception ex) {
+
+                SwingUtilities.invokeLater(() ->
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "File loaded, but it could not be saved to the database:\n"
+                                        + ex.getMessage(),
+                                "Database Error",
+                                JOptionPane.WARNING_MESSAGE
+                        )
+                );
+            }
+        });
+
+        databaseThread.start();
+    }
+
+    // ==============================
+    // REVIEW 2: ANALYSIS (THREADS)
+    // ==============================
+
+    private void runAnalysis() {
+
+        if (rows == null) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Import a CSV file first.",
+                    "Analysis",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+            return;
+        }
+
+        String[] currentHeaders = headers;
+        List<String[]> currentRows = rows;
+
+        String[] results = new String[analyzers.length];
+        Thread[] workers = new Thread[analyzers.length];
+
+        analyzeButton.setEnabled(false);
+
+        // THREADS 3..5: one thread per analyzer, all running at the same time
+        for (int i = 0; i < analyzers.length; i++) {
+
+            final int index = i;
+
+            workers[i] = new Thread(() -> {
+
+                Analyzer analyzer = analyzers[index];
+
+                try {
+                    results[index] = "=== " + analyzer.getName() + " ===\n"
+                            + analyzer.analyze(currentHeaders, currentRows)
+                            + "\n[ran on " + Thread.currentThread().getName() + "]\n\n";
+                } catch (RuntimeException ex) {
+                    results[index] = "=== " + analyzer.getName() + " ===\n"
+                            + "Analysis failed: " + ex.getMessage() + "\n\n";
+                }
+            });
+
+            workers[i].start();
+        }
+
+        // This thread waits (join) for every worker, then shows the results
+        Thread waiterThread = new Thread(() -> {
+
+            try {
+                for (Thread worker : workers) {
+                    worker.join();
+                }
+            } catch (InterruptedException ex) {
+                SwingUtilities.invokeLater(() -> analyzeButton.setEnabled(true));
+                return;
+            }
+
+            StringBuilder report = new StringBuilder();
+
+            for (String result : results) {
+                report.append(result);
+            }
+
+            int totalMissing =
+                    missingAnalyzer.countMissing(currentHeaders, currentRows);
+
+            SwingUtilities.invokeLater(() -> {
+                missingValue.setText(String.valueOf(totalMissing));
+                analyzeButton.setEnabled(true);
+                showReport(report.toString());
+            });
+        });
+
+        waiterThread.start();
+    }
+
+    private void showReport(String text) {
+
+        JTextArea area = new JTextArea(text, 18, 50);
+
+        area.setEditable(false);
+
+        area.setFont(
+                new Font("Monospaced", Font.PLAIN, 13)
+        );
 
         JOptionPane.showMessageDialog(
                 this,
-                "Selected file:\n" +
-                selectedFile.getAbsolutePath(),
-                "CSV Selected",
+                new JScrollPane(area),
+                "Analysis Report",
                 JOptionPane.INFORMATION_MESSAGE
         );
     }
-}
 
     private void styleSecondaryButton(
             JButton button
